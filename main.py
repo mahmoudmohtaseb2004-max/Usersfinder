@@ -8,35 +8,33 @@ from threading import Thread
 from pymongo import MongoClient
 from datetime import datetime, timedelta
 
-# التوكن من Railway variables
 BOT_TOKEN = os.environ.get('BOT_TOKEN')
 MONGO_URI = os.environ.get('MONGO_URI')
 
 bot = telebot.TeleBot(BOT_TOKEN)
 active_searches = {}
 
-# الاتصال بـ MongoDB
 client = MongoClient(MONGO_URI)
 db = client['telegram_bot']
 checked_collection = db['checked_usernames']
 
-# إنشاء Index لمنع التكرار
 checked_collection.create_index('username', unique=True)
 checked_collection.create_index('checked_at')
 
-# ADMIN_USERNAME - غيرها لاسم المستخدم حقك (بدون @)
-ADMIN_USERNAME = "Dafawii"  # غير هذا لاسم المستخدم حقك
+# ================= ADMIN =================
+ADMIN_USERNAME = "iitsMahmoudi"
 
 def is_admin(username):
-    """التحقق من أن المستخدم هو المشرف"""
-    return username == ADMIN_USERNAME
+    if not username:
+        return False
+    return username.lower() == ADMIN_USERNAME.lower()
+
+# ================= DATABASE =================
 
 def is_username_checked(username):
-    """التحقق هل اليوزر مفحوص من قبل"""
     return checked_collection.find_one({'username': username}) is not None
 
 def mark_username_checked(username, is_available):
-    """تسجيل يوزر مفحوص في MongoDB"""
     try:
         checked_collection.insert_one({
             'username': username,
@@ -46,258 +44,156 @@ def mark_username_checked(username, is_available):
         })
         return True
     except:
-        return False  # مكرر
+        return False
 
 def get_stats():
-    """إحصائيات من MongoDB"""
     total = checked_collection.count_documents({})
     available = checked_collection.count_documents({'is_available': True})
-    
-    # إحصائيات حسب الطول
-    total_5 = checked_collection.count_documents({'length': 5})
-    total_6 = checked_collection.count_documents({'length': 6})
-    total_7 = checked_collection.count_documents({'length': 7})
-    total_8 = checked_collection.count_documents({'length': 8})
-    
-    available_5 = checked_collection.count_documents({'length': 5, 'is_available': True})
-    available_6 = checked_collection.count_documents({'length': 6, 'is_available': True})
-    available_7 = checked_collection.count_documents({'length': 7, 'is_available': True})
-    available_8 = checked_collection.count_documents({'length': 8, 'is_available': True})
-    
+
+    stats_by_length = {}
+    for length in [5,6,7,8]:
+        stats_by_length[length] = {
+            'total': checked_collection.count_documents({'length': length}),
+            'available': checked_collection.count_documents({'length': length, 'is_available': True})
+        }
+
     return {
         'total': total,
         'available': available,
-        'by_length': {
-            5: {'total': total_5, 'available': available_5},
-            6: {'total': total_6, 'available': available_6},
-            7: {'total': total_7, 'available': available_7},
-            8: {'total': total_8, 'available': available_8}
-        }
+        'by_length': stats_by_length
     }
 
+# ================= USERNAME =================
+
+def generate_valid_username(length):
+    length = max(5, int(length))
+
+    while True:
+        first_char = random.choice(string.ascii_lowercase)
+        other_chars = string.ascii_lowercase + string.digits
+        username = first_char + ''.join(random.choices(other_chars, k=length - 1))
+
+        if len(username) >= 5:
+            return username
+
 def check_telegram_username(username):
-    """التحقق من توفر اليوزر"""
+
+    if len(username) < 5:
+        return False
+
     try:
-        url = f"https://t.me/{username}"
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
-        response = requests.get(url, headers=headers, timeout=5)
-        
-        # تحليل الصفحة
+        response = requests.get(
+            f"https://t.me/{username}",
+            timeout=5,
+            headers={"User-Agent": "Mozilla/5.0"}
+        )
+
         html = response.text.lower()
-        
-        # إذا كان اليوزر غير موجود
-        if "tgme_page" not in html or "if you have telegram, you can contact" in html:
-            return True  # متاح للتسجيل
-            
-        return False  # غير متاح
-        
+
+        if 'tgme_page_title' in html:
+            return False
+
+        if 'username not found' in html:
+            return True
+
+        if 'fragment' in html:
+            return False
+
+        return False
+
     except:
         return False
 
-def generate_valid_username(length):
-    """
-    توليد يوزر صحيح - فقط للأطوال 5 فأكثر
-    """
-    # التأكد أن الطول 5 على الأقل
-    if length < 5:
-        length = 5
-    
-    # الحرف الأول: أحرف صغيرة فقط
-    first_char = random.choice(string.ascii_lowercase)
-    
-    # باقي الأحرف: أحرف صغيرة + أرقام + underscore
-    other_chars = string.ascii_lowercase + string.digits + '_'
-    rest = ''.join(random.choices(other_chars, k=length-1))
-    
-    username = first_char + rest
-    
-    # التأكد من عدم الانتهاء بـ underscore
-    if username.endswith('_'):
-        username = username[:-1] + random.choice(string.ascii_lowercase)
-    
-    return username
+# ================= SEARCH =================
 
 def search_usernames(chat_id, length, message_id):
-    """دالة البحث - فقط للأطوال 5 فأكثر"""
-    
-    # التأكد أن طول البحث 5 على الأقل
-    if length < 5:
-        length = 5
-        bot.send_message(chat_id, "✅ تم تعديل البحث لـ 5 أحرف (الحد الأدنى)")
-    
+
+    if length not in [5,6,7,8]:
+        bot.send_message(chat_id, "❌ الطول غير مسموح")
+        return
+
     found = 0
     checked = 0
     skipped_duplicate = 0
     active_searches[chat_id] = True
     start_time = time.time()
-    
+
     while active_searches.get(chat_id, False):
-        # توليد يوزر جديد (مضمون 5+ أحرف)
+
         username = generate_valid_username(length)
-        
-        # هل مفحوص من قبل؟
+
+        if len(username) < 5:
+            continue
+
         if is_username_checked(username):
             skipped_duplicate += 1
             continue
-        
-        # فحص اليوزر
+
         is_available = check_telegram_username(username)
         checked += 1
-        
-        # تسجيل في MongoDB
+
         mark_username_checked(username, is_available)
-        
-        # إرسال إشعار إذا كان متاحاً
+
         if is_available:
             found += 1
             elapsed = int(time.time() - start_time)
-            
-            # رسالة اليوزر المتاح
+
             bot.send_message(
                 chat_id,
-                f"🎉 **يوزر متاح للتسجيل المجاني!**\n"
+                f"🎉 **يوزر متاح!**\n"
                 f"👤 @{username}\n"
                 f"📏 {len(username)} أحرف\n"
                 f"⏱ بعد {elapsed//60} دقيقة و {elapsed%60} ثانية\n"
-                f"🔗 https://t.me/{username}\n\n"
-                f"⚠️ سارع بتسجيله قبل أي شخص!",
+                f"🔗 https://t.me/{username}",
                 parse_mode='Markdown'
             )
-        
-        # تحديث الحالة كل 20 محاولة
+
         if checked % 20 == 0:
             elapsed = int(time.time() - start_time)
             stats = get_stats()
-            
+
             progress_msg = (
-                f"🔍 **بحث عن يوزرات {length} أحرف**\n"
-                f"⏱ الوقت المنقضي: {elapsed//60}:{elapsed%60:02d}\n\n"
-                f"📊 **هذه الجلسة:**\n"
-                f"   ✓ تم الفحص: {checked}\n"
-                f"   🎯 تم العثور: {found}\n"
-                f"   🔄 مكرر: {skipped_duplicate}\n\n"
-                f"💾 **إحصائيات عامة:**\n"
-                f"   📁 إجمالي المفحوص: {stats['total']:,}\n"
-                f"   ✨ إجمالي المتاح: {stats['available']}\n\n"
-                f"⚡️ السرعة: {checked//(elapsed+1)}/ثانية"
+                f"🔍 بحث عن {length} أحرف\n"
+                f"⏱ {elapsed//60}:{elapsed%60:02d}\n\n"
+                f"✓ مفحوص: {checked}\n"
+                f"🎯 متاح: {found}\n"
+                f"🔄 مكرر: {skipped_duplicate}\n\n"
+                f"💾 الإجمالي: {stats['total']:,}\n"
+                f"✨ المتاح: {stats['available']}"
             )
-            
+
             try:
-                bot.edit_message_text(progress_msg, chat_id, message_id, parse_mode='Markdown')
+                bot.edit_message_text(progress_msg, chat_id, message_id)
             except:
                 pass
-        
-        time.sleep(0.4)
-    
-    # عند التوقف
+
+        time.sleep(0.7)
+
     elapsed = int(time.time() - start_time)
-    stats = get_stats()
-    
-    final_msg = (
-        f"🛑 **توقف البحث**\n"
-        f"⏱ استمر لمدة: {elapsed//60} دقيقة\n\n"
-        f"📊 **إحصائيات الجلسة:**\n"
-        f"   ✓ تم الفحص: {checked}\n"
-        f"   🎯 تم العثور: {found}\n"
-        f"   🔄 مكرر: {skipped_duplicate}\n\n"
-        f"💾 **إجمالي في قاعدة البيانات:**\n"
-        f"   📁 كل اليوزرات: {stats['total']:,}\n"
-        f"   ✨ المتاحة: {stats['available']}\n\n"
-        f"✅ جميع اليوزرات المفحوصة 5 أحرف فأكثر"
+    bot.edit_message_text(
+        f"🛑 توقف البحث\n"
+        f"⏱ المدة: {elapsed//60} دقيقة\n"
+        f"✓ مفحوص: {checked}\n"
+        f"🎯 متاح: {found}",
+        chat_id,
+        message_id
     )
-    
-    try:
-        bot.edit_message_text(final_msg, chat_id, message_id, parse_mode='Markdown')
-    except:
-        pass
 
-@bot.message_handler(commands=['start'])
-def start(message):
-    stats = get_stats()
-    username = message.from_user.username
-    
-    welcome_msg = (
-        f"🎯 **بوت البحث عن يوزرات تليجرام**\n\n"
-        f"📊 **إحصائيات عامة:**\n"
-        f"📁 إجمالي المفحوص: {stats['total']:,}\n"
-        f"✨ إجمالي المتاح: {stats['available']}\n\n"
-        f"📏 **حسب الطول:**\n"
-        f"• 5 أحرف: {stats['by_length'][5]['total']} مفحوص | {stats['by_length'][5]['available']} متاح\n"
-        f"• 6 أحرف: {stats['by_length'][6]['total']} مفحوص | {stats['by_length'][6]['available']} متاح\n"
-        f"• 7 أحرف: {stats['by_length'][7]['total']} مفحوص | {stats['by_length'][7]['available']} متاح\n"
-        f"• 8 أحرف: {stats['by_length'][8]['total']} مفحوص | {stats['by_length'][8]['available']} متاح\n\n"
-        f"⚠️ **ملاحظة مهمة:**\n"
-        f"• البوت يبحث فقط عن يوزرات **5 أحرف فأكثر** (المجانية)\n"
-        f"• اليوزرات الأقل من 5 أحرف للبيع على Fragment ولا يتم البحث عنها\n\n"
-        f"**الأوامر المتاحة:**\n"
-        f"/search5 - 🔍 بحث عن يوزر خماسي (5 أحرف)\n"
-        f"/search6 - 🔍 بحث عن يوزر سداسي (6 أحرف)\n"
-        f"/search7 - 🔍 بحث عن يوزر سباعي (7 أحرف)\n"
-        f"/search8 - 🔍 بحث عن يوزر ثماني (8 أحرف)\n"
-        f"/stats - 📊 عرض الإحصائيات\n"
-        f"/stop - 🛑 إيقاف البحث"
-    )
-    
-    # إذا كان المستخدم هو المشرف، أضف أوامر إضافية
-    if is_admin(username):
-        welcome_msg += (
-            f"\n\n👑 **أوامر المشرف:**\n"
-            f"/cleandb - 🧹 مسح قاعدة البيانات بالكامل\n"
-            f"/cleanold - 📆 مسح البيانات القديمة\n"
-            f"/dbsize - 📊 حجم قاعدة البيانات"
-        )
-    
-    bot.reply_to(message, welcome_msg, parse_mode='Markdown')
+# ================= COMMANDS =================
 
-@bot.message_handler(commands=['stats'])
-def stats(message):
-    stats_data = get_stats()
-    
-    stats_msg = (
-        f"📊 **إحصائيات قاعدة البيانات**\n\n"
-        f"💾 **الإجمالي:**\n"
-        f"• كل اليوزرات: {stats_data['total']:,}\n"
-        f"• المتاحة: {stats_data['available']}\n\n"
-        f"📏 **حسب الطول:**\n"
-        f"• 5 أحرف: {stats_data['by_length'][5]['total']} مفحوص | {stats_data['by_length'][5]['available']} متاح\n"
-        f"• 6 أحرف: {stats_data['by_length'][6]['total']} مفحوص | {stats_data['by_length'][6]['available']} متاح\n"
-        f"• 7 أحرف: {stats_data['by_length'][7]['total']} مفحوص | {stats_data['by_length'][7]['available']} متاح\n"
-        f"• 8 أحرف: {stats_data['by_length'][8]['total']} مفحوص | {stats_data['by_length'][8]['available']} متاح\n\n"
-        f"✅ **معلومة:** جميع اليوزرات المخزنة 5 أحرف فأكثر\n"
-        f"⚡️ آخر تحديث: {datetime.now().strftime('%Y-%m-%d %H:%M')}"
-    )
-    
-    bot.reply_to(message, stats_msg, parse_mode='Markdown')
-
-@bot.message_handler(commands=['search5', 'search6', 'search7', 'search8'])
+@bot.message_handler(commands=['search5','search6','search7','search8'])
 def search(message):
+
     chat_id = message.chat.id
-    
+
     if active_searches.get(chat_id, False):
         bot.reply_to(message, "⚠️ في بحث نشط! استخدم /stop أولاً")
         return
-    
-    # تحديد طول البحث
-    if message.text == '/search5':
-        length = 5
-        msg_text = "خماسي (5 أحرف)"
-    elif message.text == '/search6':
-        length = 6
-        msg_text = "سداسي (6 أحرف)"
-    elif message.text == '/search7':
-        length = 7
-        msg_text = "سباعي (7 أحرف)"
-    else:  # search8
-        length = 8
-        msg_text = "ثماني (8 أحرف)"
-    
-    msg = bot.reply_to(
-        message, 
-        f"⏳ **بدء البحث عن يوزرات {msg_text}**\n"
-        f"📊 جاري التحميل...",
-        parse_mode='Markdown'
-    )
-    
+
+    length = int(message.text.replace('/search',''))
+
+    msg = bot.reply_to(message, f"⏳ بدء البحث عن {length} أحرف...")
+
     thread = Thread(target=search_usernames, args=(chat_id, length, msg.message_id))
     thread.daemon = True
     thread.start()
@@ -305,164 +201,50 @@ def search(message):
 @bot.message_handler(commands=['stop'])
 def stop(message):
     chat_id = message.chat.id
-    
-    if active_searches.get(chat_id, False):
-        active_searches[chat_id] = False
-        bot.reply_to(message, "🛑 **جاري إيقاف البحث وحفظ التقدم...**", parse_mode='Markdown')
-    else:
-        bot.reply_to(message, "❌ **لا يوجد بحث نشط حالياً**", parse_mode='Markdown')
+    active_searches[chat_id] = False
+    bot.reply_to(message, "🛑 تم إيقاف البحث")
 
-# ================ أوامر المشرف ================
+@bot.message_handler(commands=['stats'])
+def stats(message):
+    stats_data = get_stats()
 
-@bot.message_handler(commands=['cleandb'])
-def clean_database(message):
-    """مسح قاعدة البيانات بالكامل (للمشرف فقط)"""
-    username = message.from_user.username
-    
-    if not is_admin(username):
-        bot.reply_to(message, "❌ هذا الأمر للمشرف فقط")
-        return
-    
-    # مسح كل البيانات
-    result = checked_collection.delete_many({})
-    
-    # إعادة إنشاء Index
-    checked_collection.create_index('username', unique=True)
-    checked_collection.create_index('checked_at')
-    
-    bot.reply_to(
-        message, 
-        f"✅ **تم مسح قاعدة البيانات بالكامل**\n"
-        f"📊 عدد اليوزرات المحذوفة: {result.deleted_count}\n"
-        f"🆕 قاعدة البيانات فاضية الآن",
-        parse_mode='Markdown'
-    )
-
-@bot.message_handler(commands=['cleanold'])
-def clean_old_data(message):
-    """مسح البيانات القديمة (للمشرف فقط)"""
-    username = message.from_user.username
-    
-    if not is_admin(username):
-        bot.reply_to(message, "❌ هذا الأمر للمشرف فقط")
-        return
-    
-    # نحذف اليوزرات الأقدم من 7 أيام والغير متاحة
-    week_ago = datetime.now() - timedelta(days=7)
-    
-    result = checked_collection.delete_many({
-        'checked_at': {'$lt': week_ago},
-        'is_available': False  # فقط الغير متاحة
-    })
-    
     bot.reply_to(
         message,
-        f"✅ **تم تنظيف البيانات القديمة**\n"
-        f"📊 عدد اليوزرات المحذوفة: {result.deleted_count}\n"
-        f"💾 تم الاحتفاظ بالمتاحة والحديثة",
-        parse_mode='Markdown'
+        f"📊 الإحصائيات\n\n"
+        f"💾 الإجمالي: {stats_data['total']:,}\n"
+        f"✨ المتاح: {stats_data['available']}"
     )
-
-@bot.message_handler(commands=['dbsize'])
-def db_size(message):
-    """عرض حجم قاعدة البيانات (للمشرف فقط)"""
-    username = message.from_user.username
-    
-    if not is_admin(username):
-        bot.reply_to(message, "❌ هذا الأمر للمشرف فقط")
-        return
-    
-    # عدد اليوزرات
-    total = checked_collection.count_documents({})
-    available = checked_collection.count_documents({'is_available': True})
-    
-    # حجم قاعدة البيانات (بالميجابايت)
-    stats = db.command("dbstats")
-    size_mb = stats['dataSize'] / (1024 * 1024)
-    storage_mb = stats['storageSize'] / (1024 * 1024)
-    
-    bot.reply_to(
-        message,
-        f"📊 **حجم قاعدة البيانات**\n\n"
-        f"💾 **عدد اليوزرات:**\n"
-        f"• الإجمالي: {total:,}\n"
-        f"• المتاحة: {available}\n\n"
-        f"📦 **المساحة:**\n"
-        f"• حجم البيانات: {size_mb:.2f} MB\n"
-        f"• المساحة الفعلية: {storage_mb:.2f} MB\n"
-        f"• 512 MB المتبقية: {max(0, 512 - storage_mb):.2f} MB\n\n"
-        f"⚡️ الحالة: ✅ شغال",
-        parse_mode='Markdown'
-    )
-
-@bot.message_handler(commands=['crash'])
-def crash_database(message):
-    """مسح المجموعة بالكامل وإعادة إنشائها (للمشرف فقط)"""
-    username = message.from_user.username
-    
-    if not is_admin(username):
-        bot.reply_to(message, "❌ هذا الأمر للمشرف فقط")
-        return
-    
-    try:
-        # مسح المجموعة بالكامل
-        checked_collection.drop()
-        
-        # إعادة إنشائها
-        db.create_collection('checked_usernames')
-        checked_collection.create_index('username', unique=True)
-        checked_collection.create_index('checked_at')
-        
-        bot.reply_to(message, "💥 **انفجرت!** قاعدة البيانات فاضية تماماً")
-    except Exception as e:
-        bot.reply_to(message, f"❌ خطأ: {e}")
 
 @bot.message_handler(func=lambda m: True)
 def handle_all(message):
     bot.reply_to(
         message,
-        "👀 **الأوامر المتاحة:**\n"
-        "/search5 - بحث عن يوزرات خماسية\n"
-        "/search6 - بحث عن يوزرات سداسية\n"
-        "/search7 - بحث عن يوزرات سباعية\n"
-        "/search8 - بحث عن يوزرات ثمانية\n"
-        "/stats - عرض الإحصائيات\n"
-        "/stop - إيقاف البحث"
+        "/search5\n/search6\n/search7\n/search8\n/stats\n/stop"
     )
 
-# ================ التنظيف التلقائي ================
+# ================= AUTO CLEAN =================
 
 def auto_clean_task():
-    """تشغل مرة كل أسبوع عشان تنظف البيانات القديمة"""
     while True:
         try:
-            # نحذف اليوزرات الأقدم من 30 يوم والغير متاحة
             month_ago = datetime.now() - timedelta(days=30)
-            
-            result = checked_collection.delete_many({
+            checked_collection.delete_many({
                 'checked_at': {'$lt': month_ago},
                 'is_available': False
             })
-            
-            if result.deleted_count > 0:
-                print(f"🧹 تنظيف تلقائي: تم حذف {result.deleted_count} يوزر قديم")
-            
-            # ننتظر أسبوع كامل
             time.sleep(7 * 24 * 60 * 60)
-            
-        except Exception as e:
-            print(f"⚠️ خطأ في التنظيف التلقائي: {e}")
-            time.sleep(60 * 60)  # ننتظر ساعة لو صار خطأ
+        except:
+            time.sleep(3600)
+
+# ================= RUN =================
 
 if __name__ == '__main__':
-    print("✅ البوت شغال مع MongoDB...")
-    print("📊 يبحث فقط عن يوزرات 5 أحرف فأكثر (مجانية)")
-    print("⛔ لا يبحث عن يوزرات ثنائية أو ثلاثية أو رباعية")
-    print(f"👑 المشرف: @{ADMIN_USERNAME}")
-    
-    # شغل التنظيف التلقائي في Thread منفصل
+    print("✅ البوت شغال")
+    print("👑 المشرف: @iitsMahmoudi")
+    print("🔒 يبحث فقط عن 5 أحرف فأكثر")
+
     clean_thread = Thread(target=auto_clean_task)
     clean_thread.daemon = True
     clean_thread.start()
-    
+
     bot.infinity_polling()
