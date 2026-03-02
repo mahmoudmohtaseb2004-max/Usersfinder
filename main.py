@@ -22,7 +22,7 @@ checked_collection.create_index('username', unique=True)
 checked_collection.create_index('checked_at')
 
 # ================= ADMIN =================
-ADMIN_USERNAME = "iitsMahmoudi"
+ADMIN_USERNAME = "iitsMahmoudi"  # غيرها لاسم المستخدم حقك
 
 def is_admin(username):
     if not username:
@@ -207,18 +207,116 @@ def stop(message):
 @bot.message_handler(commands=['stats'])
 def stats(message):
     stats_data = get_stats()
+    
+    msg = (
+        f"📊 **الإحصائيات العامة**\n\n"
+        f"💾 إجمالي المفحوص: {stats_data['total']:,}\n"
+        f"✨ المتاح: {stats_data['available']}\n\n"
+        f"📏 **حسب الطول:**\n"
+        f"• 5 أحرف: {stats_data['by_length'][5]['total']} مفحوص | {stats_data['by_length'][5]['available']} متاح\n"
+        f"• 6 أحرف: {stats_data['by_length'][6]['total']} مفحوص | {stats_data['by_length'][6]['available']} متاح\n"
+        f"• 7 أحرف: {stats_data['by_length'][7]['total']} مفحوص | {stats_data['by_length'][7]['available']} متاح\n"
+        f"• 8 أحرف: {stats_data['by_length'][8]['total']} مفحوص | {stats_data['by_length'][8]['available']} متاح"
+    )
+    
+    bot.reply_to(message, msg, parse_mode='Markdown')
 
+# ================= ADMIN COMMANDS =================
+
+@bot.message_handler(commands=['cleandb'])
+def clean_database(message):
+    if not is_admin(message.from_user.username):
+        bot.reply_to(message, "❌ هذا الأمر للمشرف فقط")
+        return
+    
+    result = checked_collection.delete_many({})
+    checked_collection.create_index('username', unique=True)
+    checked_collection.create_index('checked_at')
+    
+    bot.reply_to(
+        message, 
+        f"✅ **تم مسح قاعدة البيانات**\n"
+        f"📊 عدد اليوزرات المحذوفة: {result.deleted_count}",
+        parse_mode='Markdown'
+    )
+
+@bot.message_handler(commands=['cleanold'])
+def clean_old_data(message):
+    if not is_admin(message.from_user.username):
+        bot.reply_to(message, "❌ هذا الأمر للمشرف فقط")
+        return
+    
+    week_ago = datetime.now() - timedelta(days=7)
+    result = checked_collection.delete_many({
+        'checked_at': {'$lt': week_ago},
+        'is_available': False
+    })
+    
     bot.reply_to(
         message,
-        f"📊 الإحصائيات\n\n"
-        f"💾 الإجمالي: {stats_data['total']:,}\n"
-        f"✨ المتاح: {stats_data['available']}"
+        f"✅ **تم تنظيف البيانات القديمة**\n"
+        f"📊 عدد اليوزرات المحذوفة: {result.deleted_count}",
+        parse_mode='Markdown'
     )
+
+@bot.message_handler(commands=['dbsize'])
+def db_size(message):
+    if not is_admin(message.from_user.username):
+        bot.reply_to(message, "❌ هذا الأمر للمشرف فقط")
+        return
+    
+    total = checked_collection.count_documents({})
+    available = checked_collection.count_documents({'is_available': True})
+    
+    stats = db.command("dbstats")
+    size_mb = stats['dataSize'] / (1024 * 1024)
+    storage_mb = stats['storageSize'] / (1024 * 1024)
+    
+    bot.reply_to(
+        message,
+        f"📊 **حجم قاعدة البيانات**\n\n"
+        f"📁 إجمالي اليوزرات: {total:,}\n"
+        f"✨ المتاحة: {available}\n\n"
+        f"📦 حجم البيانات: {size_mb:.2f} MB\n"
+        f"💾 المساحة الفعلية: {storage_mb:.2f} MB\n"
+        f"⚡️ 512 MB المتبقية: {max(0, 512 - storage_mb):.2f} MB",
+        parse_mode='Markdown'
+    )
+
+@bot.message_handler(commands=['start'])
+def start(message):
+    stats_data = get_stats()
+    username = message.from_user.username
+    
+    welcome_msg = (
+        f"🎯 **بوت البحث عن يوزرات تليجرام**\n\n"
+        f"📊 **إحصائيات:**\n"
+        f"📁 إجمالي: {stats_data['total']:,}\n"
+        f"✨ متاح: {stats_data['available']}\n\n"
+        f"**الأوامر:**\n"
+        f"/search5 - بحث عن 5 أحرف\n"
+        f"/search6 - بحث عن 6 أحرف\n"
+        f"/search7 - بحث عن 7 أحرف\n"
+        f"/search8 - بحث عن 8 أحرف\n"
+        f"/stats - الإحصائيات\n"
+        f"/stop - إيقاف البحث"
+    )
+    
+    if is_admin(username):
+        welcome_msg += (
+            f"\n\n👑 **أوامر المشرف:**\n"
+            f"/cleandb - مسح الكل\n"
+            f"/cleanold - تنظيف القديم\n"
+            f"/dbsize - حجم قاعدة البيانات"
+        )
+    
+    bot.reply_to(message, welcome_msg, parse_mode='Markdown')
 
 @bot.message_handler(func=lambda m: True)
 def handle_all(message):
     bot.reply_to(
         message,
+        "👀 استخدم:\n"
         "/search5\n/search6\n/search7\n/search8\n/stats\n/stop"
     )
 
@@ -228,10 +326,12 @@ def auto_clean_task():
     while True:
         try:
             month_ago = datetime.now() - timedelta(days=30)
-            checked_collection.delete_many({
+            result = checked_collection.delete_many({
                 'checked_at': {'$lt': month_ago},
                 'is_available': False
             })
+            if result.deleted_count > 0:
+                print(f"🧹 تنظيف تلقائي: حذف {result.deleted_count} يوزر")
             time.sleep(7 * 24 * 60 * 60)
         except:
             time.sleep(3600)
@@ -240,7 +340,7 @@ def auto_clean_task():
 
 if __name__ == '__main__':
     print("✅ البوت شغال")
-    print("👑 المشرف: @iitsMahmoudi")
+    print(f"👑 المشرف: @{ADMIN_USERNAME}")
     print("🔒 يبحث فقط عن 5 أحرف فأكثر")
 
     clean_thread = Thread(target=auto_clean_task)
