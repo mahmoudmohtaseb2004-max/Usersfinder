@@ -6,7 +6,7 @@ import time
 import os
 from threading import Thread
 from pymongo import MongoClient
-from datetime import datetime
+from datetime import datetime, timedelta
 
 # التوكن من Railway variables
 BOT_TOKEN = os.environ.get('BOT_TOKEN')
@@ -23,6 +23,13 @@ checked_collection = db['checked_usernames']
 # إنشاء Index لمنع التكرار
 checked_collection.create_index('username', unique=True)
 checked_collection.create_index('checked_at')
+
+# ADMIN_USERNAME - غيرها لاسم المستخدم حقك (بدون @)
+ADMIN_USERNAME = "Dafawii"  # غير هذا لاسم المستخدم حقك
+
+def is_admin(username):
+    """التحقق من أن المستخدم هو المشرف"""
+    return username == ADMIN_USERNAME
 
 def is_username_checked(username):
     """التحقق هل اليوزر مفحوص من قبل"""
@@ -120,7 +127,6 @@ def search_usernames(chat_id, length, message_id):
     
     found = 0
     checked = 0
-    skipped_short = 0
     skipped_duplicate = 0
     active_searches[chat_id] = True
     start_time = time.time()
@@ -208,6 +214,7 @@ def search_usernames(chat_id, length, message_id):
 @bot.message_handler(commands=['start'])
 def start(message):
     stats = get_stats()
+    username = message.from_user.username
     
     welcome_msg = (
         f"🎯 **بوت البحث عن يوزرات تليجرام**\n\n"
@@ -230,6 +237,15 @@ def start(message):
         f"/stats - 📊 عرض الإحصائيات\n"
         f"/stop - 🛑 إيقاف البحث"
     )
+    
+    # إذا كان المستخدم هو المشرف، أضف أوامر إضافية
+    if is_admin(username):
+        welcome_msg += (
+            f"\n\n👑 **أوامر المشرف:**\n"
+            f"/cleandb - 🧹 مسح قاعدة البيانات بالكامل\n"
+            f"/cleanold - 📆 مسح البيانات القديمة\n"
+            f"/dbsize - 📊 حجم قاعدة البيانات"
+        )
     
     bot.reply_to(message, welcome_msg, parse_mode='Markdown')
 
@@ -296,6 +312,111 @@ def stop(message):
     else:
         bot.reply_to(message, "❌ **لا يوجد بحث نشط حالياً**", parse_mode='Markdown')
 
+# ================ أوامر المشرف ================
+
+@bot.message_handler(commands=['cleandb'])
+def clean_database(message):
+    """مسح قاعدة البيانات بالكامل (للمشرف فقط)"""
+    username = message.from_user.username
+    
+    if not is_admin(username):
+        bot.reply_to(message, "❌ هذا الأمر للمشرف فقط")
+        return
+    
+    # مسح كل البيانات
+    result = checked_collection.delete_many({})
+    
+    # إعادة إنشاء Index
+    checked_collection.create_index('username', unique=True)
+    checked_collection.create_index('checked_at')
+    
+    bot.reply_to(
+        message, 
+        f"✅ **تم مسح قاعدة البيانات بالكامل**\n"
+        f"📊 عدد اليوزرات المحذوفة: {result.deleted_count}\n"
+        f"🆕 قاعدة البيانات فاضية الآن",
+        parse_mode='Markdown'
+    )
+
+@bot.message_handler(commands=['cleanold'])
+def clean_old_data(message):
+    """مسح البيانات القديمة (للمشرف فقط)"""
+    username = message.from_user.username
+    
+    if not is_admin(username):
+        bot.reply_to(message, "❌ هذا الأمر للمشرف فقط")
+        return
+    
+    # نحذف اليوزرات الأقدم من 7 أيام والغير متاحة
+    week_ago = datetime.now() - timedelta(days=7)
+    
+    result = checked_collection.delete_many({
+        'checked_at': {'$lt': week_ago},
+        'is_available': False  # فقط الغير متاحة
+    })
+    
+    bot.reply_to(
+        message,
+        f"✅ **تم تنظيف البيانات القديمة**\n"
+        f"📊 عدد اليوزرات المحذوفة: {result.deleted_count}\n"
+        f"💾 تم الاحتفاظ بالمتاحة والحديثة",
+        parse_mode='Markdown'
+    )
+
+@bot.message_handler(commands=['dbsize'])
+def db_size(message):
+    """عرض حجم قاعدة البيانات (للمشرف فقط)"""
+    username = message.from_user.username
+    
+    if not is_admin(username):
+        bot.reply_to(message, "❌ هذا الأمر للمشرف فقط")
+        return
+    
+    # عدد اليوزرات
+    total = checked_collection.count_documents({})
+    available = checked_collection.count_documents({'is_available': True})
+    
+    # حجم قاعدة البيانات (بالميجابايت)
+    stats = db.command("dbstats")
+    size_mb = stats['dataSize'] / (1024 * 1024)
+    storage_mb = stats['storageSize'] / (1024 * 1024)
+    
+    bot.reply_to(
+        message,
+        f"📊 **حجم قاعدة البيانات**\n\n"
+        f"💾 **عدد اليوزرات:**\n"
+        f"• الإجمالي: {total:,}\n"
+        f"• المتاحة: {available}\n\n"
+        f"📦 **المساحة:**\n"
+        f"• حجم البيانات: {size_mb:.2f} MB\n"
+        f"• المساحة الفعلية: {storage_mb:.2f} MB\n"
+        f"• 512 MB المتبقية: {max(0, 512 - storage_mb):.2f} MB\n\n"
+        f"⚡️ الحالة: ✅ شغال",
+        parse_mode='Markdown'
+    )
+
+@bot.message_handler(commands=['crash'])
+def crash_database(message):
+    """مسح المجموعة بالكامل وإعادة إنشائها (للمشرف فقط)"""
+    username = message.from_user.username
+    
+    if not is_admin(username):
+        bot.reply_to(message, "❌ هذا الأمر للمشرف فقط")
+        return
+    
+    try:
+        # مسح المجموعة بالكامل
+        checked_collection.drop()
+        
+        # إعادة إنشائها
+        db.create_collection('checked_usernames')
+        checked_collection.create_index('username', unique=True)
+        checked_collection.create_index('checked_at')
+        
+        bot.reply_to(message, "💥 **انفجرت!** قاعدة البيانات فاضية تماماً")
+    except Exception as e:
+        bot.reply_to(message, f"❌ خطأ: {e}")
+
 @bot.message_handler(func=lambda m: True)
 def handle_all(message):
     bot.reply_to(
@@ -309,8 +430,39 @@ def handle_all(message):
         "/stop - إيقاف البحث"
     )
 
+# ================ التنظيف التلقائي ================
+
+def auto_clean_task():
+    """تشغل مرة كل أسبوع عشان تنظف البيانات القديمة"""
+    while True:
+        try:
+            # نحذف اليوزرات الأقدم من 30 يوم والغير متاحة
+            month_ago = datetime.now() - timedelta(days=30)
+            
+            result = checked_collection.delete_many({
+                'checked_at': {'$lt': month_ago},
+                'is_available': False
+            })
+            
+            if result.deleted_count > 0:
+                print(f"🧹 تنظيف تلقائي: تم حذف {result.deleted_count} يوزر قديم")
+            
+            # ننتظر أسبوع كامل
+            time.sleep(7 * 24 * 60 * 60)
+            
+        except Exception as e:
+            print(f"⚠️ خطأ في التنظيف التلقائي: {e}")
+            time.sleep(60 * 60)  # ننتظر ساعة لو صار خطأ
+
 if __name__ == '__main__':
     print("✅ البوت شغال مع MongoDB...")
     print("📊 يبحث فقط عن يوزرات 5 أحرف فأكثر (مجانية)")
     print("⛔ لا يبحث عن يوزرات ثنائية أو ثلاثية أو رباعية")
+    print(f"👑 المشرف: @{ADMIN_USERNAME}")
+    
+    # شغل التنظيف التلقائي في Thread منفصل
+    clean_thread = Thread(target=auto_clean_task)
+    clean_thread.daemon = True
+    clean_thread.start()
+    
     bot.infinity_polling()
