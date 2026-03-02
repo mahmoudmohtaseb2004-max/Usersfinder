@@ -1,4 +1,3 @@
-
 import telebot
 import requests
 import random
@@ -46,7 +45,28 @@ def get_stats():
     """إحصائيات من MongoDB"""
     total = checked_collection.count_documents({})
     available = checked_collection.count_documents({'is_available': True})
-    return total, available
+    
+    # إحصائيات حسب الطول
+    total_5 = checked_collection.count_documents({'length': 5})
+    total_6 = checked_collection.count_documents({'length': 6})
+    total_7 = checked_collection.count_documents({'length': 7})
+    total_8 = checked_collection.count_documents({'length': 8})
+    
+    available_5 = checked_collection.count_documents({'length': 5, 'is_available': True})
+    available_6 = checked_collection.count_documents({'length': 6, 'is_available': True})
+    available_7 = checked_collection.count_documents({'length': 7, 'is_available': True})
+    available_8 = checked_collection.count_documents({'length': 8, 'is_available': True})
+    
+    return {
+        'total': total,
+        'available': available,
+        'by_length': {
+            5: {'total': total_5, 'available': available_5},
+            6: {'total': total_6, 'available': available_6},
+            7: {'total': total_7, 'available': available_7},
+            8: {'total': total_8, 'available': available_8}
+        }
+    }
 
 def check_telegram_username(username):
     """التحقق من توفر اليوزر"""
@@ -54,47 +74,64 @@ def check_telegram_username(username):
         url = f"https://t.me/{username}"
         headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
         response = requests.get(url, headers=headers, timeout=5)
-        return 'tgme_page' not in response.text
+        
+        # تحليل الصفحة
+        html = response.text.lower()
+        
+        # إذا كان اليوزر غير موجود
+        if "tgme_page" not in html or "if you have telegram, you can contact" in html:
+            return True  # متاح للتسجيل
+            
+        return False  # غير متاح
+        
     except:
         return False
 
 def generate_valid_username(length):
-    """توليد يوزر صحيح - مع التأكد أن الطول 5 على الأقل"""
-    
-    # إذا الطول المطلوب أقل من 5، ارفعه لـ 5
+    """
+    توليد يوزر صحيح - فقط للأطوال 5 فأكثر
+    """
+    # التأكد أن الطول 5 على الأقل
     if length < 5:
         length = 5
     
+    # الحرف الأول: أحرف صغيرة فقط
     first_char = random.choice(string.ascii_lowercase)
+    
+    # باقي الأحرف: أحرف صغيرة + أرقام + underscore
     other_chars = string.ascii_lowercase + string.digits + '_'
     rest = ''.join(random.choices(other_chars, k=length-1))
+    
     username = first_char + rest
     
+    # التأكد من عدم الانتهاء بـ underscore
     if username.endswith('_'):
         username = username[:-1] + random.choice(string.ascii_lowercase)
     
     return username
 
 def search_usernames(chat_id, length, message_id):
-    """دالة البحث - فقط يوزرات 5 أحرف فأكثر"""
+    """دالة البحث - فقط للأطوال 5 فأكثر"""
+    
+    # التأكد أن طول البحث 5 على الأقل
+    if length < 5:
+        length = 5
+        bot.send_message(chat_id, "✅ تم تعديل البحث لـ 5 أحرف (الحد الأدنى)")
+    
     found = 0
     checked = 0
-    skipped = 0
+    skipped_short = 0
+    skipped_duplicate = 0
     active_searches[chat_id] = True
     start_time = time.time()
     
     while active_searches.get(chat_id, False):
-        # توليد يوزر جديد
+        # توليد يوزر جديد (مضمون 5+ أحرف)
         username = generate_valid_username(length)
-        
-        # شرط مهم: إذا طول اليوزر أقل من 5، تجاهله فوراً
-        if len(username) < 5:
-            skipped += 1
-            continue
         
         # هل مفحوص من قبل؟
         if is_username_checked(username):
-            skipped += 1
+            skipped_duplicate += 1
             continue
         
         # فحص اليوزر
@@ -104,38 +141,42 @@ def search_usernames(chat_id, length, message_id):
         # تسجيل في MongoDB
         mark_username_checked(username, is_available)
         
-        # نبعت فقط إذا كان متاح وطوله 5 أو أكثر
-        if is_available and len(username) >= 5:
+        # إرسال إشعار إذا كان متاحاً
+        if is_available:
             found += 1
             elapsed = int(time.time() - start_time)
             
             # رسالة اليوزر المتاح
             bot.send_message(
                 chat_id,
-                f"🎉 **يوزر متاح!**\n"
+                f"🎉 **يوزر متاح للتسجيل المجاني!**\n"
                 f"👤 @{username}\n"
-                f"📏 {len(username)} أحرف (مجاني)\n"
+                f"📏 {len(username)} أحرف\n"
                 f"⏱ بعد {elapsed//60} دقيقة و {elapsed%60} ثانية\n"
-                f"🔗 https://t.me/{username}",
+                f"🔗 https://t.me/{username}\n\n"
+                f"⚠️ سارع بتسجيله قبل أي شخص!",
                 parse_mode='Markdown'
             )
         
         # تحديث الحالة كل 20 محاولة
         if checked % 20 == 0:
             elapsed = int(time.time() - start_time)
-            total, total_available = get_stats()
+            stats = get_stats()
+            
+            progress_msg = (
+                f"🔍 **بحث عن يوزرات {length} أحرف**\n"
+                f"⏱ الوقت المنقضي: {elapsed//60}:{elapsed%60:02d}\n\n"
+                f"📊 **هذه الجلسة:**\n"
+                f"   ✓ تم الفحص: {checked}\n"
+                f"   🎯 تم العثور: {found}\n"
+                f"   🔄 مكرر: {skipped_duplicate}\n\n"
+                f"💾 **إحصائيات عامة:**\n"
+                f"   📁 إجمالي المفحوص: {stats['total']:,}\n"
+                f"   ✨ إجمالي المتاح: {stats['available']}\n\n"
+                f"⚡️ السرعة: {checked//(elapsed+1)}/ثانية"
+            )
+            
             try:
-                progress_msg = (
-                    f"🔍 **بحث {length} أحرف**\n"
-                    f"⏱ الوقت: {elapsed//60}:{elapsed%60:02d}\n"
-                    f"📊 هذه الجلسة:\n"
-                    f"   ✓ فحص: {checked}\n"
-                    f"   🎯 وجد: {found}\n"
-                    f"   🔄 تخطي: {skipped} (قصير/مكرر)\n\n"
-                    f"💾 قاعدة البيانات:\n"
-                    f"   📁 إجمالي مفحوص: {total:,}\n"
-                    f"   ✨ إجمالي متاح: {total_available}"
-                )
                 bot.edit_message_text(progress_msg, chat_id, message_id, parse_mode='Markdown')
             except:
                 pass
@@ -144,71 +185,75 @@ def search_usernames(chat_id, length, message_id):
     
     # عند التوقف
     elapsed = int(time.time() - start_time)
-    total, total_available = get_stats()
+    stats = get_stats()
     
     final_msg = (
         f"🛑 **توقف البحث**\n"
-        f"⏱ استمر: {elapsed//60} دقيقة\n\n"
-        f"📊 إحصائيات الجلسة:\n"
-        f"   ✓ فحص: {checked}\n"
-        f"   🎯 وجد: {found}\n"
-        f"   🔄 تخطي: {skipped}\n\n"
-        f"💾 إجمالي في MongoDB:\n"
-        f"   📁 كل اليوزرات: {total:,}\n"
-        f"   ✨ المتاحة: {total_available}"
+        f"⏱ استمر لمدة: {elapsed//60} دقيقة\n\n"
+        f"📊 **إحصائيات الجلسة:**\n"
+        f"   ✓ تم الفحص: {checked}\n"
+        f"   🎯 تم العثور: {found}\n"
+        f"   🔄 مكرر: {skipped_duplicate}\n\n"
+        f"💾 **إجمالي في قاعدة البيانات:**\n"
+        f"   📁 كل اليوزرات: {stats['total']:,}\n"
+        f"   ✨ المتاحة: {stats['available']}\n\n"
+        f"✅ جميع اليوزرات المفحوصة 5 أحرف فأكثر"
     )
-    bot.edit_message_text(final_msg, chat_id, message_id, parse_mode='Markdown')
+    
+    try:
+        bot.edit_message_text(final_msg, chat_id, message_id, parse_mode='Markdown')
+    except:
+        pass
 
 @bot.message_handler(commands=['start'])
 def start(message):
-    total, available = get_stats()
+    stats = get_stats()
+    
     welcome_msg = (
-        f"🎯 **بوت البحث عن يوزرات تليجرام المجانية**\n\n"
+        f"🎯 **بوت البحث عن يوزرات تليجرام**\n\n"
         f"📊 **إحصائيات عامة:**\n"
-        f"💾 يوزرات مفحوصة: {total:,}\n"
-        f"✨ يوزرات متاحة: {available}\n\n"
-        f"⚠️ **مهم:**\n"
+        f"📁 إجمالي المفحوص: {stats['total']:,}\n"
+        f"✨ إجمالي المتاح: {stats['available']}\n\n"
+        f"📏 **حسب الطول:**\n"
+        f"• 5 أحرف: {stats['by_length'][5]['total']} مفحوص | {stats['by_length'][5]['available']} متاح\n"
+        f"• 6 أحرف: {stats['by_length'][6]['total']} مفحوص | {stats['by_length'][6]['available']} متاح\n"
+        f"• 7 أحرف: {stats['by_length'][7]['total']} مفحوص | {stats['by_length'][7]['available']} متاح\n"
+        f"• 8 أحرف: {stats['by_length'][8]['total']} مفحوص | {stats['by_length'][8]['available']} متاح\n\n"
+        f"⚠️ **ملاحظة مهمة:**\n"
         f"• البوت يبحث فقط عن يوزرات **5 أحرف فأكثر** (المجانية)\n"
-        f"• اليوزرات الأقل من 5 أحرف للبيع على Fragment فقط\n"
-        f"• جميع اليوزرات المفحوصة **تُحفظ في قاعدة بيانات** لمنع التكرار\n\n"
+        f"• اليوزرات الأقل من 5 أحرف للبيع على Fragment ولا يتم البحث عنها\n\n"
         f"**الأوامر المتاحة:**\n"
         f"/search5 - 🔍 بحث عن يوزر خماسي (5 أحرف)\n"
         f"/search6 - 🔍 بحث عن يوزر سداسي (6 أحرف)\n"
         f"/search7 - 🔍 بحث عن يوزر سباعي (7 أحرف)\n"
+        f"/search8 - 🔍 بحث عن يوزر ثماني (8 أحرف)\n"
         f"/stats - 📊 عرض الإحصائيات\n"
-        f"/stop - 🛑 إيقاف البحث\n\n"
-        f"✨ **البوت يعمل 24/7 على Railway مع MongoDB**"
+        f"/stop - 🛑 إيقاف البحث"
     )
+    
     bot.reply_to(message, welcome_msg, parse_mode='Markdown')
 
 @bot.message_handler(commands=['stats'])
 def stats(message):
-    total, available = get_stats()
-    
-    # إحصائيات إضافية
-    total_5 = checked_collection.count_documents({'length': 5})
-    total_6 = checked_collection.count_documents({'length': 6})
-    total_7 = checked_collection.count_documents({'length': 7})
-    available_5 = checked_collection.count_documents({'length': 5, 'is_available': True})
-    available_6 = checked_collection.count_documents({'length': 6, 'is_available': True})
-    available_7 = checked_collection.count_documents({'length': 7, 'is_available': True})
+    stats_data = get_stats()
     
     stats_msg = (
-        f"📊 **إحصائيات MongoDB**\n\n"
+        f"📊 **إحصائيات قاعدة البيانات**\n\n"
         f"💾 **الإجمالي:**\n"
-        f"• كل اليوزرات: {total:,}\n"
-        f"• المتاحة: {available}\n\n"
+        f"• كل اليوزرات: {stats_data['total']:,}\n"
+        f"• المتاحة: {stats_data['available']}\n\n"
         f"📏 **حسب الطول:**\n"
-        f"• 5 أحرف: {total_5:,} مفحوص | {available_5} متاح\n"
-        f"• 6 أحرف: {total_6:,} مفحوص | {available_6} متاح\n"
-        f"• 7 أحرف: {total_7:,} مفحوص | {available_7} متاح\n\n"
-        f"⚡️ **معلومات:**\n"
-        f"• لا يوجد أي يوزر مكرر\n"
-        f"• آخر تحديث: {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+        f"• 5 أحرف: {stats_data['by_length'][5]['total']} مفحوص | {stats_data['by_length'][5]['available']} متاح\n"
+        f"• 6 أحرف: {stats_data['by_length'][6]['total']} مفحوص | {stats_data['by_length'][6]['available']} متاح\n"
+        f"• 7 أحرف: {stats_data['by_length'][7]['total']} مفحوص | {stats_data['by_length'][7]['available']} متاح\n"
+        f"• 8 أحرف: {stats_data['by_length'][8]['total']} مفحوص | {stats_data['by_length'][8]['available']} متاح\n\n"
+        f"✅ **معلومة:** جميع اليوزرات المخزنة 5 أحرف فأكثر\n"
+        f"⚡️ آخر تحديث: {datetime.now().strftime('%Y-%m-%d %H:%M')}"
     )
+    
     bot.reply_to(message, stats_msg, parse_mode='Markdown')
 
-@bot.message_handler(commands=['search5', 'search6', 'search7'])
+@bot.message_handler(commands=['search5', 'search6', 'search7', 'search8'])
 def search(message):
     chat_id = message.chat.id
     
@@ -216,19 +261,23 @@ def search(message):
         bot.reply_to(message, "⚠️ في بحث نشط! استخدم /stop أولاً")
         return
     
+    # تحديد طول البحث
     if message.text == '/search5':
         length = 5
         msg_text = "خماسي (5 أحرف)"
     elif message.text == '/search6':
         length = 6
         msg_text = "سداسي (6 أحرف)"
-    else:
+    elif message.text == '/search7':
         length = 7
         msg_text = "سباعي (7 أحرف)"
+    else:  # search8
+        length = 8
+        msg_text = "ثماني (8 أحرف)"
     
     msg = bot.reply_to(
         message, 
-        f"⏳ **بدء البحث عن يوزر {msg_text}**\n"
+        f"⏳ **بدء البحث عن يوزرات {msg_text}**\n"
         f"📊 جاري التحميل...",
         parse_mode='Markdown'
     )
@@ -252,9 +301,10 @@ def handle_all(message):
     bot.reply_to(
         message,
         "👀 **الأوامر المتاحة:**\n"
-        "/search5 - بحث عن يوزر خماسي\n"
-        "/search6 - بحث عن يوزر سداسي\n"
-        "/search7 - بحث عن يوزر سباعي\n"
+        "/search5 - بحث عن يوزرات خماسية\n"
+        "/search6 - بحث عن يوزرات سداسية\n"
+        "/search7 - بحث عن يوزرات سباعية\n"
+        "/search8 - بحث عن يوزرات ثمانية\n"
         "/stats - عرض الإحصائيات\n"
         "/stop - إيقاف البحث"
     )
@@ -262,4 +312,5 @@ def handle_all(message):
 if __name__ == '__main__':
     print("✅ البوت شغال مع MongoDB...")
     print("📊 يبحث فقط عن يوزرات 5 أحرف فأكثر (مجانية)")
+    print("⛔ لا يبحث عن يوزرات ثنائية أو ثلاثية أو رباعية")
     bot.infinity_polling()
