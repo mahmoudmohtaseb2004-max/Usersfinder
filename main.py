@@ -11,7 +11,7 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Inli
 TOKEN = os.environ.get("BOT_TOKEN")
 
 if not TOKEN:
-    TOKEN = "ضع_التوكن_هنا_مباشرة_للتجربة"  # للتجربة فقط، بعدين شيلها
+    TOKEN = "ضع_التوكن_هنا"  # للتجربة
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', 
@@ -22,33 +22,25 @@ logger = logging.getLogger(__name__)
 # تخزين الألعاب
 games: Dict[str, dict] = {}
 
-# ------------------ أمر /start (للخاص والمجموعات) ------------------
+# ------------------ أمر /start ------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """رسالة الترحيب."""
     user = update.effective_user
     
-    # أزرار البداية
     keyboard = [
         [InlineKeyboardButton("🎲 العب روليت الآن", switch_inline_query="")],
-        [InlineKeyboardButton("📢 مشاركة البوت", switch_inline_query="شارك البوت مع أصدقائك")],
-        [InlineKeyboardButton("📝 شرح الاستخدام", callback_data="show_help")]
+        [InlineKeyboardButton("📝 قواعد اللعبة", callback_data="rules")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
-    # رسالة الترحيب
     welcome_text = (
         f"🎯 *أهلاً بك {user.first_name}!*\n\n"
-        f"✨ *بوت الروليت الذكي*\n"
-        f"➖➖➖➖➖➖➖➖➖\n\n"
-        f"🔹 *طريقة الاستخدام:*\n"
-        f"𝟭️⃣ اكتب @{context.bot.username} في أي محادثة\n"
-        f"𝟮️⃣ اختر نوع اللعبة من القائمة\n"
-        f"𝟯️⃣ شارك اللعبة مع أصدقائك\n\n"
-        f"🔹 *المميزات:*\n"
-        f"✅ يعمل بدون إضافة للمجموعات\n"
-        f"✅ أزرار تفاعلية سهلة\n"
-        f"✅ اختيار فائز عشوائي\n\n"
-        f"👇 اضغط على الزر لبدء اللعب"
+        f"✨ *بوت الروليت*\n"
+        f"➖➖➖➖➖➖➖\n\n"
+        f"🔹 *لبدء اللعب:*\n"
+        f"اكتب @{context.bot.username} في أي محادثة\n\n"
+        f"🔹 *القواعد:*\n"
+        f"اضغط على زر القواعد للمزيد"
     )
     
     await update.message.reply_text(
@@ -57,128 +49,141 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=reply_markup
     )
 
-# ------------------ معالج Inline Mode ------------------
+# ------------------ معالج Inline Mode (الأهم هنا) ------------------
 async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """هذا اللي يخلي البوت يشتغل لما تكتب @username."""
-    query = update.inline_query.query
+    """هذا اللي يشتغل لما تكتب @userbot + كلمة."""
+    query = update.inline_query.query.lower()  # الكلمة اللي كتبها المستخدم
     user = update.inline_query.from_user
     
-    logger.info(f"استعلام Inline من {user.first_name}: {query}")
-    
-    # الألعاب المتاحة
-    games_list = [
-        {
-            "id": "simple",
-            "title": "🎲 روليت عادي",
-            "description": "سحب فائز عشوائي",
-            "emoji": "🎲"
-        },
-        {
-            "id": "premium",
-            "title": "🎯 روليت أحكام",
-            "description": "مع عجلة حظ وأزرار تفاعلية",
-            "emoji": "🎯"
-        },
-        {
-            "id": "teams",
-            "title": "👥 روليت فرق",
-            "description": "قسّم المشاركين لفرق",
-            "emoji": "👥"
-        }
-    ]
+    logger.info(f"استعلام: {query} من {user.first_name}")
     
     results = []
     
-    # تصفية حسب البحث
-    filtered_games = games_list
-    if query:
-        filtered_games = [g for g in games_list if query.lower() in g['title'].lower()]
-    
-    # إنشاء النتائج
-    for game in filtered_games:
-        game_id = f"{game['id']}_{uuid.uuid4().hex[:8]}"
-        
-        # حفظ اللعبة
-        games[game_id] = {
-            "type": game['id'],
-            "players": [],
-            "players_names": [],
-            "creator": user.id,
-            "creator_name": user.first_name
-        }
-        
-        # أزرار اللعبة
-        keyboard = [
-            [InlineKeyboardButton("✅ انضمام", callback_data=f"join_{game_id}")],
-            [InlineKeyboardButton("👥 المشاركين", callback_data=f"list_{game_id}"),
-             InlineKeyboardButton("🏆 سحب", callback_data=f"draw_{game_id}")]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        # نص اللعبة
-        game_text = (
-            f"{game['emoji']} *{game['title']}*\n"
-            f"➖➖➖➖➖➖➖\n"
-            f"👤 المنشئ: {user.first_name}\n"
-            f"👥 المشاركون: 0\n"
-            f"➖➖➖➖➖➖➖\n"
-            f"🕹️ اضغط انضمام للمشاركة"
-        )
-        
+    # إذا كتب "rules" أو أي كلمة
+    if "rules" in query or "قواعد" in query:
+        # عرض القواعد
         results.append(
             InlineQueryResultArticle(
-                id=game_id,
-                title=game['title'],
-                description=f"{game['description']} | 👥 0 مشارك",
+                id=str(uuid.uuid4()),
+                title="📝 قواعد اللعبة",
+                description="اضغط لقراءة قواعد الروليت",
                 input_message_content=InputTextMessageContent(
-                    game_text,
+                    "📝 *قواعد لعبة الروليت:*\n\n"
+                    "1️⃣ أي شخص يقدر يشارك بالضغط على انضمام\n"
+                    "2️⃣ المشرف فقط يقدر يسحب الفائز\n"
+                    "3️⃣ بعد السحب، تنتهي اللعبة\n"
+                    "4️⃣ ممنوع الغش أو استخدام بوتات أخرى\n\n"
+                    "🎯 استمتع باللعبة!",
                     parse_mode="Markdown"
-                ),
-                reply_markup=reply_markup
+                )
             )
         )
     
-    # إرسال النتائج
+    # إذا كتب "game" أو "لعبة"
+    elif "game" in query or "لعبة" in query or query == "":
+        # عرض الألعاب المتاحة
+        games_list = [
+            {
+                "id": f"simple_{uuid.uuid4().hex[:8]}",
+                "title": "🎲 روليت عادي",
+                "description": "سحب فائز عشوائي",
+                "emoji": "🎲"
+            },
+            {
+                "id": f"premium_{uuid.uuid4().hex[:8]}",
+                "title": "🎯 روليت أحكام",
+                "description": "مع عجلة حظ متحركة",
+                "emoji": "🎯"
+            }
+        ]
+        
+        for game_data in games_list:
+            game_id = game_data['id']
+            
+            # حفظ اللعبة
+            games[game_id] = {
+                "type": game_data['title'],
+                "players": [],
+                "players_names": [],
+                "creator": user.id,
+                "creator_name": user.first_name
+            }
+            
+            # أزرار اللعبة
+            keyboard = [
+                [InlineKeyboardButton("✅ انضمام", callback_data=f"join_{game_id}")],
+                [InlineKeyboardButton("👥 المشاركين", callback_data=f"list_{game_id}"),
+                 InlineKeyboardButton("🏆 سحب", callback_data=f"draw_{game_id}")]
+            ]
+            
+            results.append(
+                InlineQueryResultArticle(
+                    id=game_id,
+                    title=game_data['title'],
+                    description=f"{game_data['description']} | 👥 0 مشارك",
+                    input_message_content=InputTextMessageContent(
+                        f"{game_data['emoji']} *{game_data['title']}*\n"
+                        f"➖➖➖➖➖➖➖\n"
+                        f"👤 المنشئ: {user.first_name}\n"
+                        f"👥 المشاركون: 0\n"
+                        f"➖➖➖➖➖➖➖\n"
+                        f"🕹️ اضغط انضمام للمشاركة",
+                        parse_mode="Markdown"
+                    ),
+                    reply_markup=InlineKeyboardMarkup(keyboard)
+                )
+            )
+    
+    # إذا كتب أي كلمة ثانية
+    else:
+        results.append(
+            InlineQueryResultArticle(
+                id=str(uuid.uuid4()),
+                title=f"🔍 لا توجد نتيجة لـ '{query}'",
+                description="اضغط لرؤية الألعاب المتاحة",
+                input_message_content=InputTextMessageContent(
+                    f"❌ لا توجد لعبة بهذا الاسم: {query}\n\n"
+                    f"جرب: game, rules, لعبة, قواعد",
+                    parse_mode="Markdown"
+                )
+            )
+        )
+    
+    # إرسال النتائج (مهم جداً: cache_time=0 عشان يظهر على طول)
     await update.inline_query.answer(results, cache_time=0)
 
 # ------------------ معالج الأزرار ------------------
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """معالج الضغط على الأزرار."""
     query = update.callback_query
     await query.answer()
     
     data = query.data
-    user = query.from_user
     
-    # شرح الاستخدام
-    if data == "show_help":
-        help_text = (
-            "📝 *شرح مفصل للاستخدام:*\n\n"
-            "1️⃣ *لبدء اللعبة:*\n"
-            "   اكتب @username في أي محادثة\n\n"
-            "2️⃣ *للمشاركة:*\n"
-            "   اضغط على زر 'انضمام'\n\n"
-            "3️⃣ *للسحب:*\n"
-            "   أي مشرف يقدر يضغط 'سحب'\n\n"
-            "💡 *ملاحظة:*\n"
-            "   اللعبة تنتهي بعد السحب"
+    # قواعد اللعبة
+    if data == "rules":
+        rules_text = (
+            "📝 *قواعد لعبة الروليت:*\n\n"
+            "1️⃣ *المشاركة:* أي عضو يقدر يشارك\n"
+            "2️⃣ *السحب:* المشرف فقط يسحب الفائز\n"
+            "3️⃣ *الانتهاء:* اللعبة تنتهي بعد السحب\n"
+            "4️⃣ *العد:* كل مشارك له فرصة متساوية\n\n"
+            "🎯 *استمتع وحظ سعيد!*"
         )
         keyboard = [[InlineKeyboardButton("🔙 رجوع", callback_data="back_to_start")]]
         await query.edit_message_text(
-            help_text,
+            rules_text,
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
         return
     
-    # رجوع للبداية
     if data == "back_to_start":
         keyboard = [
-            [InlineKeyboardButton("🎲 العب روليت الآن", switch_inline_query="")],
-            [InlineKeyboardButton("📝 شرح الاستخدام", callback_data="show_help")]
+            [InlineKeyboardButton("🎲 العب روليت", switch_inline_query="")],
+            [InlineKeyboardButton("📝 القواعد", callback_data="rules")]
         ]
         await query.edit_message_text(
-            "🎯 *مرحباً بك في بوت الروليت!*\n\nاختر ما تريد:",
+            "🎯 *مرحباً بك في بوت الروليت!*",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
@@ -189,31 +194,28 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         action, game_id = data.split("_", 1)
         
         if game_id not in games:
-            await query.edit_message_text("❌ اللعبة انتهت صلاحيتها")
+            await query.edit_message_text("❌ اللعبة انتهت")
             return
         
         game = games[game_id]
         
-        # انضمام
         if action == "join":
             if user.id in game["players"]:
-                await query.answer("أنت مشترك بالفعل!", show_alert=True)
+                await query.answer("أنت مشترك!", show_alert=True)
                 return
             
             game["players"].append(user.id)
             game["players_names"].append(user.first_name)
             
             # تحديث النص
-            new_text = query.message.text.split("👥")[0] + f"👥 المشاركون: {len(game['players'])}\n➖➖➖➖➖➖➖\n🕹️ اضغط انضمام للمشاركة"
+            new_text = query.message.text.split("👥")[0] + f"👥 المشاركون: {len(game['players'])}\n➖➖➖➖➖➖➖\n🕹️ اضغط انضمام"
             
             await query.edit_message_text(
                 new_text,
                 parse_mode="Markdown",
                 reply_markup=query.message.reply_markup
             )
-            await query.answer(f"✅ تم انضمامك! العدد: {len(game['players'])}")
         
-        # عرض المشاركين
         elif action == "list":
             if not game["players"]:
                 players_text = "لا يوجد مشاركين"
@@ -229,7 +231,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=InlineKeyboardMarkup(keyboard)
             )
         
-        # سحب الفائز
         elif action == "draw":
             if len(game["players"]) == 0:
                 await query.answer("لا يوجد مشاركين!", show_alert=True)
@@ -245,7 +246,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"👥 عدد المشاركين: {len(game['players'])}"
             )
             
-            # حذف اللعبة
             del games[game_id]
             
             await query.edit_message_text(
@@ -253,9 +253,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode="Markdown"
             )
         
-        # رجوع للعبة
         elif action == "back":
-            game = games[game_id]
             keyboard = [
                 [InlineKeyboardButton("✅ انضمام", callback_data=f"join_{game_id}")],
                 [InlineKeyboardButton("👥 المشاركين", callback_data=f"list_{game_id}"),
@@ -270,24 +268,23 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ------------------ معالج الأخطاء ------------------
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """تسجيل الأخطاء."""
-    logger.error(f"حدث خطأ: {context.error}")
+    logger.error(f"خطأ: {context.error}")
 
-# ------------------ التشغيل الرئيسي ------------------
+# ------------------ التشغيل ------------------
 def main():
-    """تشغيل البوت."""
-    # إنشاء التطبيق
-    application = Application.builder().token(TOKEN).build()
+    app = Application.builder().token(TOKEN).build()
     
-    # إضافة المعالجات
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(InlineQueryHandler(inline_query))
-    application.add_handler(CallbackQueryHandler(button_handler))
-    application.add_error_handler(error_handler)
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(InlineQueryHandler(inline_query))
+    app.add_handler(CallbackQueryHandler(button_handler))
+    app.add_error_handler(error_handler)
     
-    # تشغيل البوت
-    print("🤖 البوت شغال... جرب تكتب @username في أي محادثة")
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+    print("🤖 البوت شغال... جرب:")
+    print(f"• اكتب @{os.environ.get('BOT_USERNAME', 'userbot')} game")
+    print(f"• اكتب @{os.environ.get('BOT_USERNAME', 'userbot')} rules")
+    print("• او اكتب /start في الخاص")
+    
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
     main()
