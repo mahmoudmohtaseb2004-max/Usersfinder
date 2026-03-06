@@ -1,350 +1,313 @@
-import telebot
-import requests
-import random
-import string
-import time
 import os
-from threading import Thread
-from pymongo import MongoClient
-from datetime import datetime, timedelta
+import math
+import random
+import logging
+import imageio
+from PIL import Image, ImageDraw
+from typing import Dict
 
-BOT_TOKEN = os.environ.get('BOT_TOKEN')
-MONGO_URI = os.environ.get('MONGO_URI')
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 
-bot = telebot.TeleBot(BOT_TOKEN)
-active_searches = {}
+# ------------------ الإعدادات ------------------
 
-client = MongoClient(MONGO_URI)
-db = client['telegram_bot']
-checked_collection = db['checked_usernames']
+TOKEN = os.getenv("BOT_TOKEN")
 
-checked_collection.create_index('username', unique=True)
-checked_collection.create_index('checked_at')
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
 
-# ================= ADMIN =================
-ADMIN_USERNAME = "iitsMahmoudi"  # غيرها لاسم المستخدم حقك
+games: Dict[int, dict] = {}
 
-def is_admin(username):
-    if not username:
-        return False
-    return username.lower() == ADMIN_USERNAME.lower()
+# ------------------ رسم عجلة الحظ ------------------
 
-# ================= DATABASE =================
+def draw_wheel(players, angle):
 
-def is_username_checked(username):
-    return checked_collection.find_one({'username': username}) is not None
+    size = 700
+    center = size // 2
+    radius = 300
 
-def mark_username_checked(username, is_available):
-    try:
-        checked_collection.insert_one({
-            'username': username,
-            'checked_at': datetime.now(),
-            'is_available': is_available,
-            'length': len(username)
-        })
-        return True
-    except:
-        return False
+    img = Image.new("RGB", (size, size), "white")
+    draw = ImageDraw.Draw(img)
 
-def get_stats():
-    total = checked_collection.count_documents({})
-    available = checked_collection.count_documents({'is_available': True})
+    total = len(players)
+    slice_angle = 360 / total
 
-    stats_by_length = {}
-    for length in [5,6,7,8]:
-        stats_by_length[length] = {
-            'total': checked_collection.count_documents({'length': length}),
-            'available': checked_collection.count_documents({'length': length, 'is_available': True})
-        }
+    colors = [
+        "#FF6B6B",
+        "#FFD93D",
+        "#6BCB77",
+        "#4D96FF",
+        "#B983FF",
+        "#FF9F1C",
+    ]
 
-    return {
-        'total': total,
-        'available': available,
-        'by_length': stats_by_length
+    start = angle
+
+    for i, name in enumerate(players):
+
+        end = start + slice_angle
+
+        draw.pieslice(
+            [center - radius, center - radius, center + radius, center + radius],
+            start,
+            end,
+            fill=colors[i % len(colors)],
+            outline="black",
+        )
+
+        mid = (start + end) / 2
+
+        x = center + math.cos(math.radians(mid)) * radius * 0.6
+        y = center + math.sin(math.radians(mid)) * radius * 0.6
+
+        draw.text((x - 20, y - 10), name[:6], fill="black")
+
+        start = end
+
+    # مؤشر السهم
+    draw.polygon(
+        [(center, 50), (center - 20, 100), (center + 20, 100)],
+        fill="black",
+    )
+
+    return img
+
+
+# ------------------ إنشاء حركة دوران ------------------
+
+def generate_spin(players):
+
+    frames = []
+
+    angle = 0
+
+    for i in range(35):
+
+        angle += random.randint(10, 25)
+
+        frame = draw_wheel(players, angle)
+
+        frames.append(frame)
+
+    path = "wheel.gif"
+
+    imageio.mimsave(path, frames, duration=0.07)
+
+    return path
+
+
+# ------------------ رسالة البداية ------------------
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    keyboard = [
+        [InlineKeyboardButton("🎡 بدء لعبة عجلة الحظ", callback_data="new_game")]
+    ]
+
+    await update.message.reply_text(
+        "🎡 *مرحباً بك في بوت عجلة الحظ*\n\n"
+        "يمكن للمشرفين بدء لعبة وسحب فائز عشوائي.",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+
+
+# ------------------ بدء لعبة ------------------
+
+async def new_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    query = update.callback_query
+    await query.answer()
+
+    chat = query.message.chat
+    user = query.from_user
+
+    admins = await chat.get_administrators()
+    admin_ids = [admin.user.id for admin in admins]
+
+    if user.id not in admin_ids:
+        await query.answer("⛔ فقط المشرف يمكنه بدء اللعبة", show_alert=True)
+        return
+
+    if chat.id in games:
+        await query.answer("⚠️ هناك لعبة جارية بالفعل", show_alert=True)
+        return
+
+    games[chat.id] = {
+        "players": {}
     }
 
-# ================= USERNAME =================
+    keyboard = [
+        [InlineKeyboardButton("✅ انضمام", callback_data="join")],
+        [InlineKeyboardButton("👥 عرض المشاركين", callback_data="players")],
+        [InlineKeyboardButton("🎡 تدوير العجلة", callback_data="spin")],
+        [InlineKeyboardButton("❌ إلغاء", callback_data="cancel")],
+    ]
 
-def generate_valid_username(length):
-    length = max(5, int(length))
+    await query.edit_message_text(
+        f"🎡 *لعبة عجلة الحظ*\n\n"
+        f"👤 بدأها: {user.first_name}\n"
+        f"👥 عدد المشاركين: 0\n\n"
+        f"اضغط انضمام للمشاركة.",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
 
-    while True:
-        first_char = random.choice(string.ascii_lowercase)
-        other_chars = string.ascii_lowercase + string.digits
-        username = first_char + ''.join(random.choices(other_chars, k=length - 1))
 
-        if len(username) >= 5:
-            return username
+# ------------------ الانضمام ------------------
 
-def check_telegram_username(username):
+async def join(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
-    if len(username) < 5:
-        return False
+    query = update.callback_query
+    await query.answer()
 
-    try:
-        response = requests.get(
-            f"https://t.me/{username}",
-            timeout=5,
-            headers={"User-Agent": "Mozilla/5.0"}
+    user = query.from_user
+    chat = query.message.chat
+
+    game = games.get(chat.id)
+
+    if not game:
+        return
+
+    if user.id in game["players"]:
+        await query.answer("أنت مشارك بالفعل", show_alert=True)
+        return
+
+    game["players"][user.id] = user.first_name
+
+    keyboard = query.message.reply_markup
+
+    await query.edit_message_text(
+        f"🎡 *لعبة عجلة الحظ*\n\n"
+        f"👥 المشاركون: {len(game['players'])}",
+        parse_mode="Markdown",
+        reply_markup=keyboard,
+    )
+
+
+# ------------------ عرض المشاركين ------------------
+
+async def players(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    query = update.callback_query
+    await query.answer()
+
+    chat = query.message.chat
+    game = games.get(chat.id)
+
+    if not game:
+        return
+
+    if not game["players"]:
+        text = "لا يوجد مشاركين بعد"
+    else:
+        text = "\n".join(
+            [f"• {name}" for name in game["players"].values()]
         )
 
-        html = response.text.lower()
+    await query.message.reply_text(
+        f"👥 المشاركون:\n\n{text}"
+    )
 
-        if 'tgme_page_title' in html:
-            return False
 
-        if 'username not found' in html:
-            return True
+# ------------------ تدوير العجلة ------------------
 
-        if 'fragment' in html:
-            return False
+async def spin(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
-        return False
+    query = update.callback_query
+    await query.answer()
 
-    except:
-        return False
+    chat = query.message.chat
+    user = query.from_user
 
-# ================= SEARCH =================
+    admins = await chat.get_administrators()
+    admin_ids = [a.user.id for a in admins]
 
-def search_usernames(chat_id, length, message_id):
-
-    if length not in [5,6,7,8]:
-        bot.send_message(chat_id, "❌ الطول غير مسموح")
+    if user.id not in admin_ids:
+        await query.answer("⛔ فقط المشرف يمكنه تدوير العجلة", show_alert=True)
         return
 
-    found = 0
-    checked = 0
-    skipped_duplicate = 0
-    active_searches[chat_id] = True
-    start_time = time.time()
+    game = games.get(chat.id)
 
-    while active_searches.get(chat_id, False):
-
-        username = generate_valid_username(length)
-
-        if len(username) < 5:
-            continue
-
-        if is_username_checked(username):
-            skipped_duplicate += 1
-            continue
-
-        is_available = check_telegram_username(username)
-        checked += 1
-
-        mark_username_checked(username, is_available)
-
-        if is_available:
-            found += 1
-            elapsed = int(time.time() - start_time)
-
-            bot.send_message(
-                chat_id,
-                f"🎉 **يوزر متاح!**\n"
-                f"👤 @{username}\n"
-                f"📏 {len(username)} أحرف\n"
-                f"⏱ بعد {elapsed//60} دقيقة و {elapsed%60} ثانية\n"
-                f"🔗 https://t.me/{username}",
-                parse_mode='Markdown'
-            )
-
-        if checked % 20 == 0:
-            elapsed = int(time.time() - start_time)
-            stats = get_stats()
-
-            progress_msg = (
-                f"🔍 بحث عن {length} أحرف\n"
-                f"⏱ {elapsed//60}:{elapsed%60:02d}\n\n"
-                f"✓ مفحوص: {checked}\n"
-                f"🎯 متاح: {found}\n"
-                f"🔄 مكرر: {skipped_duplicate}\n\n"
-                f"💾 الإجمالي: {stats['total']:,}\n"
-                f"✨ المتاح: {stats['available']}"
-            )
-
-            try:
-                bot.edit_message_text(progress_msg, chat_id, message_id)
-            except:
-                pass
-
-        time.sleep(0.7)
-
-    elapsed = int(time.time() - start_time)
-    bot.edit_message_text(
-        f"🛑 توقف البحث\n"
-        f"⏱ المدة: {elapsed//60} دقيقة\n"
-        f"✓ مفحوص: {checked}\n"
-        f"🎯 متاح: {found}",
-        chat_id,
-        message_id
-    )
-
-# ================= COMMANDS =================
-
-@bot.message_handler(commands=['search5','search6','search7','search8'])
-def search(message):
-
-    chat_id = message.chat.id
-
-    if active_searches.get(chat_id, False):
-        bot.reply_to(message, "⚠️ في بحث نشط! استخدم /stop أولاً")
+    if not game or not game["players"]:
+        await query.answer("لا يوجد مشاركين", show_alert=True)
         return
 
-    length = int(message.text.replace('/search',''))
+    players = list(game["players"].values())
 
-    msg = bot.reply_to(message, f"⏳ بدء البحث عن {length} أحرف...")
+    gif = generate_spin(players)
 
-    thread = Thread(target=search_usernames, args=(chat_id, length, msg.message_id))
-    thread.daemon = True
-    thread.start()
+    winner_id = random.choice(list(game["players"].keys()))
+    winner_name = game["players"][winner_id]
 
-@bot.message_handler(commands=['stop'])
-def stop(message):
-    chat_id = message.chat.id
-    active_searches[chat_id] = False
-    bot.reply_to(message, "🛑 تم إيقاف البحث")
-
-@bot.message_handler(commands=['stats'])
-def stats(message):
-    stats_data = get_stats()
-    
-    msg = (
-        f"📊 **الإحصائيات العامة**\n\n"
-        f"💾 إجمالي المفحوص: {stats_data['total']:,}\n"
-        f"✨ المتاح: {stats_data['available']}\n\n"
-        f"📏 **حسب الطول:**\n"
-        f"• 5 أحرف: {stats_data['by_length'][5]['total']} مفحوص | {stats_data['by_length'][5]['available']} متاح\n"
-        f"• 6 أحرف: {stats_data['by_length'][6]['total']} مفحوص | {stats_data['by_length'][6]['available']} متاح\n"
-        f"• 7 أحرف: {stats_data['by_length'][7]['total']} مفحوص | {stats_data['by_length'][7]['available']} متاح\n"
-        f"• 8 أحرف: {stats_data['by_length'][8]['total']} مفحوص | {stats_data['by_length'][8]['available']} متاح"
-    )
-    
-    bot.reply_to(message, msg, parse_mode='Markdown')
-
-# ================= ADMIN COMMANDS =================
-
-@bot.message_handler(commands=['cleandb'])
-def clean_database(message):
-    if not is_admin(message.from_user.username):
-        bot.reply_to(message, "❌ هذا الأمر للمشرف فقط")
-        return
-    
-    result = checked_collection.delete_many({})
-    checked_collection.create_index('username', unique=True)
-    checked_collection.create_index('checked_at')
-    
-    bot.reply_to(
-        message, 
-        f"✅ **تم مسح قاعدة البيانات**\n"
-        f"📊 عدد اليوزرات المحذوفة: {result.deleted_count}",
-        parse_mode='Markdown'
+    await context.bot.send_animation(
+        chat_id=chat.id,
+        animation=open(gif, "rb"),
+        caption=f"🎡 تدور العجلة...\n\n🏆 الفائز هو: {winner_name}",
     )
 
-@bot.message_handler(commands=['cleanold'])
-def clean_old_data(message):
-    if not is_admin(message.from_user.username):
-        bot.reply_to(message, "❌ هذا الأمر للمشرف فقط")
-        return
-    
-    week_ago = datetime.now() - timedelta(days=7)
-    result = checked_collection.delete_many({
-        'checked_at': {'$lt': week_ago},
-        'is_available': False
-    })
-    
-    bot.reply_to(
-        message,
-        f"✅ **تم تنظيف البيانات القديمة**\n"
-        f"📊 عدد اليوزرات المحذوفة: {result.deleted_count}",
-        parse_mode='Markdown'
+    del games[chat.id]
+
+
+# ------------------ إلغاء اللعبة ------------------
+
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    query = update.callback_query
+    await query.answer()
+
+    chat = query.message.chat
+
+    if chat.id in games:
+        del games[chat.id]
+
+    keyboard = [
+        [InlineKeyboardButton("🎡 بدء لعبة جديدة", callback_data="new_game")]
+    ]
+
+    await query.edit_message_text(
+        "تم إلغاء اللعبة.",
+        reply_markup=InlineKeyboardMarkup(keyboard),
     )
 
-@bot.message_handler(commands=['dbsize'])
-def db_size(message):
-    if not is_admin(message.from_user.username):
-        bot.reply_to(message, "❌ هذا الأمر للمشرف فقط")
-        return
-    
-    total = checked_collection.count_documents({})
-    available = checked_collection.count_documents({'is_available': True})
-    
-    stats = db.command("dbstats")
-    size_mb = stats['dataSize'] / (1024 * 1024)
-    storage_mb = stats['storageSize'] / (1024 * 1024)
-    
-    bot.reply_to(
-        message,
-        f"📊 **حجم قاعدة البيانات**\n\n"
-        f"📁 إجمالي اليوزرات: {total:,}\n"
-        f"✨ المتاحة: {available}\n\n"
-        f"📦 حجم البيانات: {size_mb:.2f} MB\n"
-        f"💾 المساحة الفعلية: {storage_mb:.2f} MB\n"
-        f"⚡️ 512 MB المتبقية: {max(0, 512 - storage_mb):.2f} MB",
-        parse_mode='Markdown'
-    )
 
-@bot.message_handler(commands=['start'])
-def start(message):
-    stats_data = get_stats()
-    username = message.from_user.username
-    
-    welcome_msg = (
-        f"🎯 **بوت البحث عن يوزرات تليجرام**\n\n"
-        f"📊 **إحصائيات:**\n"
-        f"📁 إجمالي: {stats_data['total']:,}\n"
-        f"✨ متاح: {stats_data['available']}\n\n"
-        f"**الأوامر:**\n"
-        f"/search5 - بحث عن 5 أحرف\n"
-        f"/search6 - بحث عن 6 أحرف\n"
-        f"/search7 - بحث عن 7 أحرف\n"
-        f"/search8 - بحث عن 8 أحرف\n"
-        f"/stats - الإحصائيات\n"
-        f"/stop - إيقاف البحث"
-    )
-    
-    if is_admin(username):
-        welcome_msg += (
-            f"\n\n👑 **أوامر المشرف:**\n"
-            f"/cleandb - مسح الكل\n"
-            f"/cleanold - تنظيف القديم\n"
-            f"/dbsize - حجم قاعدة البيانات"
-        )
-    
-    bot.reply_to(message, welcome_msg, parse_mode='Markdown')
+# ------------------ معالج الأزرار ------------------
 
-@bot.message_handler(func=lambda m: True)
-def handle_all(message):
-    bot.reply_to(
-        message,
-        "👀 استخدم:\n"
-        "/search5\n/search6\n/search7\n/search8\n/stats\n/stop"
-    )
+async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
-# ================= AUTO CLEAN =================
+    data = update.callback_query.data
 
-def auto_clean_task():
-    while True:
-        try:
-            month_ago = datetime.now() - timedelta(days=30)
-            result = checked_collection.delete_many({
-                'checked_at': {'$lt': month_ago},
-                'is_available': False
-            })
-            if result.deleted_count > 0:
-                print(f"🧹 تنظيف تلقائي: حذف {result.deleted_count} يوزر")
-            time.sleep(7 * 24 * 60 * 60)
-        except:
-            time.sleep(3600)
+    if data == "new_game":
+        await new_game(update, context)
 
-# ================= RUN =================
+    elif data == "join":
+        await join(update, context)
 
-if __name__ == '__main__':
-    print("✅ البوت شغال")
-    print(f"👑 المشرف: @{ADMIN_USERNAME}")
-    print("🔒 يبحث فقط عن 5 أحرف فأكثر")
+    elif data == "players":
+        await players(update, context)
 
-    clean_thread = Thread(target=auto_clean_task)
-    clean_thread.daemon = True
-    clean_thread.start()
+    elif data == "spin":
+        await spin(update, context)
 
-    bot.infinity_polling()
+    elif data == "cancel":
+        await cancel(update, context)
+
+
+# ------------------ التشغيل ------------------
+
+def main():
+
+    app = Application.builder().token(TOKEN).build()
+
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CallbackQueryHandler(buttons))
+
+    print("🎡 Wheel Bot Running...")
+
+    app.run_polling()
+
+
+if __name__ == "__main__":
+    main()
